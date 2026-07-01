@@ -1,10 +1,48 @@
 # 🥜 Cachew
 
-Keeps a conversation's **prompt cache warm with minimal input**, so your next
-real prompt is a cheap cache *read* instead of an expensive cache *write*.
+**You're an hour into a long session.** You step away for coffee. The prompt
+cache's 5-minute TTL quietly lapses. Your next message re-processes the entire
+context from scratch — a multi-dollar turn *before the model generates a single
+token*. Cache **reads** are ~10× cheaper than fresh input and ~12× cheaper than
+cache **writes**, so a warm cache is the difference between a $0.10 turn and a
+$1+ turn — every single time you go idle.
 
-Works for any provider/model pi can stream, whether it's a built-in provider
-or a custom gateway provider.
+Cachew keeps the cache warm with a tiny periodic ping, so your next real prompt
+is always a cheap cache *read* instead of an expensive cache *write*. Works for
+any provider/model pi can stream (built-in or a custom gateway).
+
+## What it costs, explicitly (Claude Opus 4.8)
+
+Per-million-token rates:
+
+| | input | cache write | cache read | output |
+|---|--:|--:|--:|--:|
+| **Opus 4.8** | $5.00 | $6.25 | **$0.50** | $25.00 |
+
+A cache **read is 10× cheaper than input** and **12.5× cheaper than a cache write**.
+
+Say you're deep in a session carrying a **200k-token** context (system prompt +
+loaded files + history). Every turn re-sends that whole prefix; what you pay for
+it depends entirely on whether the cache is still warm:
+
+| your next turn | prefix billed as | cost of the 200k prefix |
+|---|---|--:|
+| **warm** (cache HIT) | 200k × $0.50/M | **$0.10** |
+| **cold** (cache MISS — TTL lapsed) | 200k × $6.25/M | **$1.25** |
+
+So a 6-minute coffee break turns a $0.10 turn into a **$1.25 turn — a 12.5× tax**,
+paid before the model does any work. Go idle after coffee, lunch, a meeting, and
+some thinking, and that's **~$5 of pure re-write tax** across an afternoon that
+bought you nothing.
+
+Cachew's keep-alive ping is itself just a cache read — 200k × $0.50/M = **$0.10**
+every ~4 min (~$1.50/hr) — and each read resets the 5-min TTL, so your real
+prompts stay in the $0.10 column. While you're actively working your own turns
+keep it warm for free; the ping only earns its keep across your idle gaps.
+
+> **Honest caveat:** the *first* warm-up after a genuinely cold prefix still pays
+> one cache write to establish the entry. Cachew keeps an *already-warm* prefix
+> warm — it can't make the first write free.
 
 ## Install
 
@@ -258,22 +296,6 @@ you read a prefix, so you must present the full one.
 This is why the **prefix-drift safety** exists: if a ping returns `cacheRead == 0`
 (a write), the live prefix diverged from what was cached, and after
 `MAX_CONSEC_MISSES` in a row Cachew disables itself rather than keep paying.
-
----
-
-## Economics (Opus, ~100k-token conversation)
-
-```
-warm ping  ≈ 100k × $0.50/1M = $0.05   (and resets the 5-min clock)
-cold start ≈ 100k × $6.25/1M = $0.625  (a full cacheWrite, once)
-```
-
-Keeping warm costs ~$0.05 every ~4.5 min (~$0.65/hr), but each real prompt you
-send during that window is a $0.05 read instead of a $0.625 write.
-
-**Honest caveat:** warming keeps an *already-warm* prefix warm. The very first
-ping after a cold prefix still pays one `cacheWrite` to establish the entry —
-Cachew doesn't make the first warm-up free.
 
 ---
 
