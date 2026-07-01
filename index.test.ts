@@ -173,11 +173,16 @@ test("capOutputTokens caps output verbatim per wire shape and leaves the prefix 
 	// OpenAI Responses / Completions.
 	assert.equal((capOutputTokens({ max_output_tokens: 9 }) as any).max_output_tokens, 1);
 	assert.equal((capOutputTokens({ max_completion_tokens: 9 }) as any).max_completion_tokens, 1);
-	// Google.
-	assert.equal(
-		(capOutputTokens({ generationConfig: { maxOutputTokens: 9 } }) as any).generationConfig.maxOutputTokens,
-		1,
-	);
+	// Google (pi wire shape: { model, contents, config } — cap lives at config.maxOutputTokens).
+	const cappedGoogle = capOutputTokens({
+		model: "gemini",
+		contents: [],
+		config: { maxOutputTokens: 9, temperature: 0.5 },
+	}) as any;
+	assert.equal(cappedGoogle.config.maxOutputTokens, 1);
+	assert.equal(cappedGoogle.config.temperature, 0.5); // other config untouched
+	// A top-level generationConfig is NOT pi's shape → unrecognised → reconstruct.
+	assert.equal(capOutputTokens({ generationConfig: { maxOutputTokens: 9 } }), undefined);
 
 	// Unrecognised shape → undefined → caller falls back to reconstruction.
 	assert.equal(capOutputTokens({ something: "else" }), undefined);
@@ -196,9 +201,9 @@ test("describeThinking detects extended thinking per wire shape (for cache-miss 
 	assert.equal(describeThinking({ thinking: { type: "disabled" } }), "thinking OFF");
 	// OpenAI Responses.
 	assert.equal(describeThinking({ reasoning: { effort: "high" } }), "reasoning ON (effort high)");
-	// Google.
+	// Google (config.thinkingConfig).
 	assert.equal(
-		describeThinking({ generationConfig: { thinkingConfig: { thinkingBudget: 2048 } } }),
+		describeThinking({ config: { thinkingConfig: { thinkingBudget: 2048 } } }),
 		"thinking ON (budget 2048)",
 	);
 	// No thinking config present on a recognised-ish object → OFF.

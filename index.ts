@@ -157,9 +157,11 @@ export function capOutputTokens(payload: unknown): unknown | undefined {
 	if ("max_output_tokens" in p) return { ...p, max_output_tokens: 1 };
 	// OpenAI Chat Completions.
 	if ("max_completion_tokens" in p) return { ...p, max_completion_tokens: 1 };
-	// Google Generative AI / Vertex.
-	if (p.generationConfig && typeof p.generationConfig === "object") {
-		return { ...p, generationConfig: { ...p.generationConfig, maxOutputTokens: 1 } };
+	// Google Generative AI / Vertex: pi's wire payload is { model, contents, config }
+	// with the generation params spread into `config` (so the output cap lives at
+	// `config.maxOutputTokens`), NOT a top-level `generationConfig`. Match that shape.
+	if (p.config && typeof p.config === "object" && Array.isArray(p.contents)) {
+		return { ...p, config: { ...p.config, maxOutputTokens: 1 } };
 	}
 	return undefined;
 }
@@ -193,9 +195,11 @@ export function describeThinking(payload: unknown): string {
 	}
 	// OpenAI Responses: reasoning: { effort }.
 	if (p.reasoning && typeof p.reasoning === "object") return `reasoning ON (effort ${p.reasoning.effort ?? "?"})`;
-	// Google Generative AI / Vertex: generationConfig.thinkingConfig.
-	if (p.generationConfig?.thinkingConfig)
-		return `thinking ON (budget ${p.generationConfig.thinkingConfig.thinkingBudget ?? "?"})`;
+	// Google Generative AI / Vertex: config.thinkingConfig (thinkingBudget or thinkingLevel).
+	if (p.config?.thinkingConfig) {
+		const tc = p.config.thinkingConfig;
+		return `thinking ON (budget ${tc.thinkingBudget ?? tc.thinkingLevel ?? "?"})`;
+	}
 	return "thinking OFF";
 }
 
