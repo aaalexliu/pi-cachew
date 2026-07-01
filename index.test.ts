@@ -353,6 +353,22 @@ test("CachewLogComponent renders hits/misses/skips with ping numbers and counts"
 	assert.equal(closed, true);
 });
 
+test("CachewLogComponent: narrow width still shows core metrics (no clip at 'read')", () => {
+	// Regression: the old ANSI-aware truncator miscounted color-code chars as
+	// visible width and clipped rows right after the first "read" label, hiding all
+	// token/cost metrics on a sub-full-width overlay (e.g. the 90%-width default).
+	const log = [
+		{ n: 65, ts: 0, outcome: "hit" as const, via: "replay", read: 19100, write: 0, inTok: 3, outTok: 1, cost: 0.0057, costs: { read: 0.0096, write: 0, input: 0, output: 0.0001 }, think: "thinking OFF", text: "Hi" },
+	];
+	const comp = new CachewLogComponent(fakeTheme, () => log, () => {});
+	// 80 cols → innerW 78 → the full row (~95 visible) MUST truncate, but the
+	// leading token counts + total must survive (they come before the breakdown).
+	const out = comp.render(80).join("\n");
+	assert.ok(out.includes("read 19.1k"), `cacheRead metric clipped: ${out}`);
+	assert.ok(out.includes("write 0"), `cacheWrite metric clipped: ${out}`);
+	assert.ok(out.includes("$0.0057"), `total cost clipped: ${out}`);
+});
+
 test("CachewLogComponent: arrow keys scroll and Esc closes (matchesKey)", () => {
 	const log = Array.from({ length: 30 }, (_, i) => ({
 		n: i + 1,

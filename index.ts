@@ -304,21 +304,27 @@ export class CachewLogComponent {
 			body = toks + total + breakdown + resp;
 		}
 		const s = ` ${th.fg("dim", num)} ${tag} ${via} ${body}`;
-		// hard-truncate to the inner width (ANSI-aware) so the box never wraps
+		// Hard-truncate to the inner width so the box never wraps. Tokenize into ANSI
+		// SGR sequences (copied verbatim, zero visible width) and individual visible
+		// code points (width 1). The previous char-by-char counter miscounted escape
+		// params as visible width and clipped rows right after "read".
 		if (vwidth(s) <= innerW) return s;
 		let out = "";
 		let w = 0;
-		for (const ch of s) {
-			if (ch === "\x1b") {
-				// copy the whole escape sequence without counting width
-				out += ch;
+		let clipped = false;
+		for (const part of s.match(/\x1b\[[0-9;]*m|./gu) ?? []) {
+			if (part.charCodeAt(0) === 0x1b) {
+				out += part; // ANSI color: copy, don't count
 				continue;
 			}
-			if (w >= innerW - 1) break;
-			out += ch;
-			if (!/[\d;[m]/.test(ch) || out.slice(-2, -1) !== "\x1b") w += stripAnsi(ch).length;
+			if (w >= innerW - 1) {
+				clipped = true;
+				break;
+			}
+			out += part;
+			w += 1;
 		}
-		return out;
+		return clipped ? `${out}\x1b[0m` : out; // reset so a clipped color can't bleed
 	}
 
 	render(width: number): string[] {
