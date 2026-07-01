@@ -1,0 +1,37 @@
+{
+  "name": "pi-cachew",
+  "version": "0.1.0",
+  "description": "🥜 Cachew — a pi extension that keeps a conversation's prompt cache warm with a tiny periodic ping, so your next real prompt is a cheap cache read instead of an expensive cache write. Works with built-in and custom gateway providers.",
+  "type": "module",
+  "license": "MIT",
+  "author": "aaalexliu",
+  "homepage": "https://github.com/aaalexliu/pi-cachew",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aaalexliu/pi-cachew.git"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "prompt-cache",
+    "anthropic",
+    "bedrock"
+  ],
+  "pi": {
+    "extensions": ["index.ts"]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test-alias-hook.mjs --test --experimental-strip-types '**/*.test.ts'"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.2",
+    "@types/node": "^24.13.2",
+    "typescript": "^5.6.0"
+  }
+}
