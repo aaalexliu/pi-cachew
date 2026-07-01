@@ -506,8 +506,9 @@ export default function (pi: ExtensionAPI) {
 		if (note) mid = note;
 		else if (agentBusy) mid = "active";
 		else if (mode === "magic" && !hasWarmTarget()) mid = "waiting for 1st turn";
+		else if (inFlight) mid = "pinging…";
 		else if (nextPingAt) mid = `next ${Math.max(0, Math.ceil((nextPingAt - Date.now()) / 1000))}s`;
-		else mid = "armed";
+		else mid = "ready";
 		ui.setStatus("cachew", `${tag} · ${mid} · hit rate ${rate()}% (${hits}/${pings})`);
 	};
 
