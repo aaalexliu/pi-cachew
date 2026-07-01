@@ -872,6 +872,18 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("🥜 Cachew disabled", "info");
 					break;
 				case "now":
+					if (!enabled) {
+						ctx.ui.notify("🥜 Cachew is off — enable with /cachew on", "warning");
+						break;
+					}
+					if (agentBusy) {
+						ctx.ui.notify("🥜 agent is busy — the cache re-warms automatically when it goes idle", "info");
+						break;
+					}
+					if (inFlight || sessionPingPending) {
+						ctx.ui.notify("🥜 a ping is already in flight", "info");
+						break;
+					}
 					if (mode === "magic" && !hasWarmTarget()) {
 						ctx.ui.notify(
 							"🥜 nothing to warm yet — magic mode needs one real turn first (send a prompt).",
