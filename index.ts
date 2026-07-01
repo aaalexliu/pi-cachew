@@ -851,10 +851,10 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// /cachew  — status | on | off | now | reset | debug | log | mode magic|session | every <seconds>
+	// /cachew  — status | on | off | reset | debug | log | mode magic|session | every <seconds> | now
 	pi.registerCommand("cachew", {
 		description:
-			"🥜 keep the prompt cache warm (status|on|off|now|reset|debug [on|off]|log|mode magic|session|every <seconds>)",
+			"🥜 keep the prompt cache warm (status|on|off|reset|debug [on|off]|log|mode magic|session|every <seconds>|now)",
 		handler: async (args, ctx) => {
 			captureRefs(ctx);
 			startDisplay();
@@ -870,29 +870,6 @@ export default function (pi: ExtensionAPI) {
 					enabled = false;
 					clearWarm();
 					ctx.ui.notify("🥜 Cachew disabled", "info");
-					break;
-				case "now":
-					if (!enabled) {
-						ctx.ui.notify("🥜 Cachew is off — enable with /cachew on", "warning");
-						break;
-					}
-					if (agentBusy) {
-						ctx.ui.notify("🥜 agent is busy — the cache re-warms automatically when it goes idle", "info");
-						break;
-					}
-					if (inFlight || sessionPingPending) {
-						ctx.ui.notify("🥜 a ping is already in flight", "info");
-						break;
-					}
-					if (mode === "magic" && !hasWarmTarget()) {
-						ctx.ui.notify(
-							"🥜 nothing to warm yet — magic mode needs one real turn first (send a prompt).",
-							"warning",
-						);
-						break;
-					}
-					ctx.ui.notify(`🥜 warming now (${mode})…`, "info");
-					await warmPing();
 					break;
 				case "reset":
 					pings = hits = consecMisses = coldSkips = 0;
@@ -939,6 +916,32 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify(`🥜 warming every ${secs}s`, "info");
 					break;
 				}
+				// `now` is a manual debug/verify affordance — the keep-warm loop is fully
+				// automatic once enabled, so this just fires a ping immediately (handy with
+				// `debug on` to confirm cache hits without waiting out the interval).
+				case "now":
+					if (!enabled) {
+						ctx.ui.notify("🥜 Cachew is off — enable with /cachew on", "warning");
+						break;
+					}
+					if (agentBusy) {
+						ctx.ui.notify("🥜 agent is busy — the cache re-warms automatically when it goes idle", "info");
+						break;
+					}
+					if (inFlight || sessionPingPending) {
+						ctx.ui.notify("🥜 a ping is already in flight", "info");
+						break;
+					}
+					if (mode === "magic" && !hasWarmTarget()) {
+						ctx.ui.notify(
+							"🥜 nothing to warm yet — magic mode needs one real turn first (send a prompt).",
+							"warning",
+						);
+						break;
+					}
+					ctx.ui.notify(`🥜 warming now (${mode})…`, "info");
+					await warmPing();
+					break;
 				default:
 					ctx.ui.notify(
 						`🥜 Cachew ${enabled ? "on" : "off"} · mode ${mode} · ` +

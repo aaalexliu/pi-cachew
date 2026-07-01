@@ -19,10 +19,10 @@ Then in any pi session:
 ```
 /cachew            # status
 /cachew on|off     # enable / disable
-/cachew now        # warm the cache right now
 /cachew mode magic|session
 /cachew every <seconds>
 /cachew reset      # reset hit/miss stats
+/cachew now        # warm immediately (manual/debug — normally automatic)
 ```
 
 The footer shows mode, seconds-until-next-ping, and hit rate. To pin a version,
@@ -282,13 +282,13 @@ Cachew doesn't make the first warm-up free.
 ```
 /cachew                 # status
 /cachew on | off        # enable / disable
-/cachew now             # warm immediately
 /cachew reset           # clear stats
 /cachew debug [on|off]  # print full cache metrics + response for EVERY ping
 /cachew log             # open an interactive overlay of recent pings (scrollable)
 /cachew mode magic      # behind-the-scenes ping (default)
 /cachew mode session    # send a literal "." into history
 /cachew every <seconds> # set the warm interval (runtime; resets on reload)
+/cachew now             # warm immediately (manual/debug — the loop is automatic)
 ```
 
 The footer shows: mode · seconds-until-next-ping · hit rate, e.g.
