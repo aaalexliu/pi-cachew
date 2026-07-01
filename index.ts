@@ -428,6 +428,9 @@ export default function (pi: ExtensionAPI) {
 		if (!enabled || agentBusy) return;
 		nextPingAt = Date.now() + warmEveryMs;
 		warmTimer = setTimeout(() => void warmPing(), warmEveryMs);
+		// unref like displayTimer: a pending keep-alive ping should never keep the
+		// process alive on its own (matters for clean exit / test hygiene).
+		if (typeof warmTimer === "object" && (warmTimer as any).unref) (warmTimer as any).unref();
 	};
 
 	// Sleep-aware guard: have we been idle longer than the cache can survive?
