@@ -658,7 +658,7 @@ export default function (pi: ExtensionAPI) {
 
 	async function warmPing() {
 		clearWarm();
-		if (!enabled || agentBusy || inFlight) return;
+		if (!enabled || agentBusy || inFlight || sessionPingPending) return;
 		if (!cacheCapable(currentModel)) return arm();
 
 		// Sleep-aware skip: if we've been idle longer than the cache TTL (e.g. the
