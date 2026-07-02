@@ -13,6 +13,8 @@ back up is a cheap cache *read* instead of an expensive cache *write* — you
 don't pay $4 just to get talking again. Works for any provider/model pi can
 stream (built-in or a custom gateway).
 
+![Cachew demo — footer showing hit rate 100%](assets/demo.gif)
+
 ## What it costs, explicitly (Claude Opus 4.8)
 
 Per-million-token rates:
