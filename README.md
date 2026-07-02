@@ -1,15 +1,17 @@
 # 🥜 Cachew (cache warmer) — stop paying the cold-cache tax in pi
 
-**You're ripping on at minimum 12 pi sessions** (why wouldn't you — don't you
-feel the AGI). A few of your agents let their prompt cache's 5-minute TTL lapse.
-Your next message re-writes the whole context from scratch — a $1+ turn *before
-the model generates a token*. Cache **reads** are ~10× cheaper than input and
-~12× cheaper than cache **writes**.
+**You've got a long pi session open — say 600k tokens of context** — and you
+walked away from it. Lunch, a meeting, a different task. By the time you come
+back the prompt cache's 5-minute TTL has lapsed, so your next message re-writes
+that entire 600k prefix from scratch — **~$4 *before the model generates a single
+token*.** You didn't do any work; you just paid to reload the session you
+already had. Cache **reads** are ~10× cheaper than input and ~12× cheaper than
+cache **writes**.
 
-Cachew keeps the cache warm with a tiny periodic ping, so all your individual
-sessions keep feasting on cheap tokens. Your next real prompt is always a cheap
-cache *read* instead of an expensive cache *write*. Works for any provider/model
-pi can stream (built-in or a custom gateway).
+Cachew keeps the cache warm with a tiny periodic ping, so picking that session
+back up is a cheap cache *read* instead of an expensive cache *write* — you
+don't pay $4 just to get talking again. Works for any provider/model pi can
+stream (built-in or a custom gateway).
 
 ## What it costs, explicitly (Claude Opus 4.8)
 
@@ -21,25 +23,24 @@ Per-million-token rates:
 
 A cache **read is 10× cheaper than input** and **12.5× cheaper than a cache write**.
 
-Say you're deep in a session carrying a **400k-token** context (system prompt +
+Say you left a session open carrying a **600k-token** context (system prompt +
 loaded files + history). Every turn re-sends that whole prefix; what you pay for
-it depends entirely on whether the cache is still warm:
+it when you come back depends entirely on whether the cache is still warm:
 
-| your next turn | prefix billed as | cost of the 400k prefix |
+| your next turn | prefix billed as | cost of the 600k prefix |
 |---|---|--:|
-| **warm** (cache HIT) | 400k × $0.50/M | **$0.20** |
-| **cold** (cache MISS — TTL lapsed) | 400k × $6.25/M | **$2.50** |
+| **warm** (cache HIT) | 600k × $0.50/M | **$0.30** |
+| **cold** (cache MISS — TTL lapsed) | 600k × $6.25/M | **$3.75** |
 
-So a 6-minute coffee break turns a $0.20 turn into a **$2.50 turn — a 12.5× tax**,
-paid before the model does any work. Go idle after coffee, lunch, a meeting, and
-some thinking, and that's **~$10 of pure re-write tax** across an afternoon that
-bought you nothing — and that's *one* session; multiply it across the dozen
-you're running.
+So forgetting about that session over lunch turns a $0.30 turn into a **$3.75
+turn — a 12.5× tax**, paid before the model does any work. Do that a few times
+across a day — every time you step away and come back — and it's real money
+spent re-loading context you never lost.
 
-Cachew's keep-alive ping is itself just a cache read — 400k × $0.50/M = **$0.20**
-every ~4 min (~$3/hr) — and each read resets the 5-min TTL, so your real
-prompts stay in the $0.20 column. While you're actively working your own turns
-keep it warm for free; the ping only earns its keep across your idle gaps.
+Cachew's keep-alive ping is itself just a cache read — 600k × $0.50/M = **$0.30**
+every ~4 min (~$4.50/hr) — and each read resets the 5-min TTL, so coming back to
+the session stays in the $0.30 column. While you're actively working your own
+turns keep it warm for free; the ping only earns its keep across your idle gaps.
 
 > **Honest caveat:** the *first* warm-up after a genuinely cold prefix still pays
 > one cache write to establish the entry. Cachew keeps an *already-warm* prefix
