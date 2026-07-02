@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import cachew, { capOutputTokens, describeThinking, isCacheCold, CachewLogComponent } from "./index.ts";
 
 /**
@@ -52,10 +55,12 @@ function makeCtx(cacheRead: number) {
 const fakeTheme = { fg: (_c: string, t: string) => t } as any;
 
 const lastDefined = (xs: Array<string | undefined>) => [...xs].reverse().find((x) => x != null);
+const testConfigPath = () => join(mkdtempSync(join(tmpdir(), "cachew-")), "cachew.json");
+const installCachew = (pi: unknown) => cachew(pi as any, { configPath: testConfigPath() });
 
 test("regression: a cache-capable model is read via ctx.model (not getModel())", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses, notes } = makeCtx(0.5); // opus: cacheRead > 0
 	handlers.get("session_start")!({}, ctx); // arms + renders the footer
@@ -71,7 +76,7 @@ test("regression: a cache-capable model is read via ctx.model (not getModel())",
 
 test("a 0-cacheRead model is correctly treated as non-cacheable", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses, notes } = makeCtx(0); // e.g. kimi
 	handlers.get("session_start")!({}, ctx);
@@ -85,7 +90,7 @@ test("a 0-cacheRead model is correctly treated as non-cacheable", async () => {
 
 test("footer shows labelled hit rate and no dollar spend", async () => {
 	const { pi, handlers } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -99,7 +104,7 @@ test("footer shows labelled hit rate and no dollar spend", async () => {
 
 test("off/on toggles disable and re-enable the footer", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -113,9 +118,56 @@ test("off/on toggles disable and re-enable the footer", async () => {
 	handlers.get("session_shutdown")!({}, ctx);
 });
 
+test("footer off hides the footer without disabling cachew", async () => {
+	const { pi, handlers, commands } = makePi();
+	installCachew(pi);
+
+	const { ctx, statuses, notes } = makeCtx(0.5);
+	handlers.get("session_start")!({}, ctx);
+	assert.ok(lastDefined(statuses)?.includes("hit rate"), `footer before off: ${lastDefined(statuses)}`);
+
+	await commands.get("cachew")!.handler("footer off", ctx);
+	assert.equal(statuses.at(-1), undefined);
+
+	await commands.get("cachew")!.handler("status", ctx);
+	assert.equal(statuses.at(-1), undefined);
+	assert.ok(notes.some((n) => n.includes("Cachew on")), notes.join("\n"));
+
+	await commands.get("cachew")!.handler("footer on", ctx);
+	assert.ok(lastDefined(statuses)?.includes("hit rate"), `footer after on: ${lastDefined(statuses)}`);
+
+	handlers.get("session_shutdown")!({}, ctx);
+});
+
+test("settings are loaded from and saved to config", async () => {
+	const configPath = join(mkdtempSync(join(tmpdir(), "cachew-")), "cachew.json");
+	writeFileSync(configPath, JSON.stringify({ footer: false, mode: "session", warmEveryMs: 1_000 }));
+
+	const first = makePi();
+	cachew(first.pi as any, { configPath });
+	const firstRun = makeCtx(0.5);
+	first.handlers.get("session_start")!({}, firstRun.ctx);
+	assert.equal(firstRun.statuses.at(-1), undefined);
+
+	await first.commands.get("cachew")!.handler("status", firstRun.ctx);
+	assert.ok(firstRun.notes.some((n) => n.includes("mode session")), firstRun.notes.join("\n"));
+	assert.ok(firstRun.notes.some((n) => n.includes("every 1s")), firstRun.notes.join("\n"));
+
+	await first.commands.get("cachew")!.handler("footer on", firstRun.ctx);
+	assert.equal(JSON.parse(readFileSync(configPath, "utf8")).footer, true);
+	first.handlers.get("session_shutdown")!({}, firstRun.ctx);
+
+	const second = makePi();
+	cachew(second.pi as any, { configPath });
+	const secondRun = makeCtx(0.5);
+	second.handlers.get("session_start")!({}, secondRun.ctx);
+	assert.ok(lastDefined(secondRun.statuses)?.includes("hit rate"), `footer after restart: ${lastDefined(secondRun.statuses)}`);
+	second.handlers.get("session_shutdown")!({}, secondRun.ctx);
+});
+
 test("magic mode shows 'waiting for 1st turn' until a real call is captured", () => {
 	const { pi, handlers } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx); // armed, but nothing captured yet
@@ -134,7 +186,7 @@ test("magic mode shows 'waiting for 1st turn' until a real call is captured", ()
 
 test("`every <seconds>` reconfigures the interval and re-arms", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, statuses, notes } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -232,7 +284,7 @@ test("isCacheCold: sleep-aware skip predicate (wall-clock anchored)", () => {
 
 test("cachew skips the ping after a long idle gap (session mode, sleep sim)", async () => {
 	const { pi, handlers, commands, sent } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -258,7 +310,7 @@ test("cachew skips the ping after a long idle gap (session mode, sleep sim)", as
 
 test("cachew DOES ping in session mode when the cache is still warm", async () => {
 	const { pi, handlers, commands, sent } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx); // lastWarmAt = now (warm)
@@ -272,7 +324,7 @@ test("cachew DOES ping in session mode when the cache is still warm", async () =
 
 test("debug mode prints a per-ping HIT readout with cache metrics + response (session)", async () => {
 	const { pi, handlers, commands, sent } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, notes } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -304,7 +356,7 @@ test("debug mode prints a per-ping HIT readout with cache metrics + response (se
 
 test("debug off suppresses HIT readouts but misses still warn", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, notes } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);
@@ -424,7 +476,7 @@ test("CachewLogComponent: Kitty-encoded Esc also closes", () => {
 
 test("session pings are recorded and surface in the /cachew log overlay", async () => {
 	const { pi, handlers, commands } = makePi();
-	cachew(pi as any);
+	installCachew(pi);
 
 	const { ctx, customFactories } = makeCtx(0.5);
 	handlers.get("session_start")!({}, ctx);

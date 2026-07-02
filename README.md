@@ -60,10 +60,11 @@ Then in any pi session:
 /cachew mode magic|session
 /cachew every <seconds>
 /cachew reset      # reset hit/miss stats
+/cachew footer on|off  # show/hide the footer while keeping cachew active
 /cachew now        # warm immediately (manual/debug — normally automatic)
 ```
 
-The footer shows mode, seconds-until-next-ping, and hit rate. To pin a version,
+The footer shows mode, seconds-until-next-ping, and hit rate unless disabled with `/cachew footer off`. To pin a version,
 install a tag or commit, e.g. `pi install git:github.com/aaalexliu/pi-cachew@v0.1.0`.
 Update later with `pi update --extensions`; remove with
 `pi remove git:github.com/aaalexliu/pi-cachew`.
@@ -87,14 +88,14 @@ Prompt caches don't live forever. Typical retention windows:
 
 When only "short" retention is enabled (the common case), every cacheable Claude
 is on the **5-minute sliding window**. By default Cachew only warms models that
-actually advertise caching (`cost.cacheRead > 0`); set `WARM_ANY_MODEL = true`
-to warm everything.
+actually advertise caching (`cost.cacheRead > 0`); set `warmAnyModel: true` in
+`~/.pi/agent/cachew.json` to warm everything.
 
 ---
 
 ## Two ways to keep warm
 
-Configure the default with `DEFAULT_MODE`; switch at runtime with
+Configure the default with `~/.pi/agent/cachew.json`; switch at runtime with
 `/cachew mode magic|session`.
 
 ### `magic` (behind the scenes, default)
@@ -130,7 +131,7 @@ the **exact** prefix pi would send:
 and appends **one throwaway `"."` user turn** (an idle conversation ends on an
 assistant message, which isn't a valid trailing turn).
 
-Then, `WARM_EVERY_MS` after the last activity (only while idle), it:
+Then, `warmEveryMs` after the last activity (only while idle), it:
 
 1. looks up the provider for the model's api via `getApiProvider(model.api)` —
    this resolves built-in **and** custom providers (e.g. a custom Bedrock gateway),
@@ -305,15 +306,16 @@ This is why the **prefix-drift safety** exists: if a ping returns `cacheRead == 
 /cachew                 # status
 /cachew on | off        # enable / disable
 /cachew reset           # clear stats
+/cachew footer on | off # show / hide the footer while keeping cachew active
 /cachew debug [on|off]  # print full cache metrics + response for EVERY ping
 /cachew log             # open an interactive overlay of recent pings (scrollable)
 /cachew mode magic      # behind-the-scenes ping (default)
 /cachew mode session    # send a literal "." into history
-/cachew every <seconds> # set the warm interval (runtime; resets on reload)
+/cachew every <seconds> # set and persist the warm interval
 /cachew now             # warm immediately (manual/debug — the loop is automatic)
 ```
 
-The footer shows: mode · seconds-until-next-ping · hit rate, e.g.
+The footer shows: mode · seconds-until-next-ping · hit rate, unless disabled with `/cachew footer off`, e.g.
 
 ```
 🥜 magic · next 142s · hit rate 100% (3/3)
@@ -382,19 +384,39 @@ wasted rewrite" to "guaranteed miss, **$0 wasted**".
 
 ---
 
-## Config (top of `index.ts`)
+## Config
 
-| Const | Default | Meaning |
-|---|---|---|
-| `DEFAULT_MODE` | `"magic"` | `"magic"` (out-of-band) or `"session"` (sends `.`) |
-| `TTL_MS` | `5 * 60_000` | provider "short" sliding cache TTL (Anthropic 5 min) |
-| `WARM_EVERY_MS` | `4 * 60_000` | default ping interval (240s — a full 60s under the TTL); override at runtime with `/cachew every <seconds>` |
-| `COLD_SKIP_MARGIN_MS` | `20_000` | skip the ping if idle within this margin of the TTL (cache already cold) |
-| `WAKE_DRIFT_MS` | `5_000` | clock jump between 1s footer ticks this large ⇒ resumed from sleep |
-| `PING_TIMEOUT_MS` | `30_000` | abort a single magic ping after this long |
-| `MAX_CONSEC_MISSES` | `2` | disable magic after this many cache-miss pings |
-| `SESSION_PING_TEXT` | `"."` | what `session` mode sends |
-| `WARM_ANY_MODEL` | `false` | `false` → only warm models with `cost.cacheRead > 0` |
+Cachew reads user-level settings from `~/.pi/agent/cachew.json`. If the file is missing, Cachew creates it with the defaults below.
+
+`/cachew footer on|off`, `/cachew mode magic|session`, and `/cachew every <seconds>` update this file, so those choices survive reloads and new pi sessions.
+
+```json
+{
+  "mode": "magic",
+  "footer": true,
+  "ttlMs": 300000,
+  "warmEveryMs": 240000,
+  "pingTimeoutMs": 30000,
+  "maxConsecutiveMisses": 2,
+  "sessionPingText": ".",
+  "coldSkipMarginMs": 20000,
+  "wakeDriftMs": 5000,
+  "warmAnyModel": false
+}
+```
+
+| Setting | Meaning |
+|---|---|
+| `mode` | `"magic"` for out-of-band pings, or `"session"` to send `.` into history |
+| `footer` | `false` → keep warming, but don't render a footer status |
+| `ttlMs` | provider "short" sliding cache TTL; Anthropic defaults to 5 min |
+| `warmEveryMs` | ping interval while idle; default is 240s, a full 60s under the TTL |
+| `coldSkipMarginMs` | skip the ping if idle within this margin of the TTL |
+| `wakeDriftMs` | clock jump between 1s footer ticks this large ⇒ resumed from sleep |
+| `pingTimeoutMs` | abort a single magic ping after this long |
+| `maxConsecutiveMisses` | disable magic after this many cache-miss pings |
+| `sessionPingText` | what `session` mode sends |
+| `warmAnyModel` | `false` → only warm models with `cost.cacheRead > 0` |
 
 ---
 

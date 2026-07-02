@@ -14,10 +14,10 @@
  *   - OpenAI auto-cache      → ~5-10 min idle, not directly controllable
  *
  * By default Cachew only warms models that actually advertise caching
- * (cost.cacheRead > 0). Set WARM_ANY_MODEL = true to warm everything anyway.
+ * (cost.cacheRead > 0). Set warmAnyModel=true in cachew.json to warm everything anyway.
  *
  * ───────────────────────────────────────────────────────────────────────────
- * TWO WAYS TO KEEP WARM  (config: DEFAULT_MODE, toggle: /cachew mode magic|session)
+ * TWO WAYS TO KEEP WARM  (config: cachew.json, toggle: /cachew mode magic|session)
  *
  *  • "magic"  (behind the scenes, default)
  *    ── EXACTLY WHAT IT DOES ───────────────────────────────────────────────
@@ -45,7 +45,7 @@
  *      - the active tool set (`getActiveTools()` ∩ `getAllTools()`), in order;
  *      and appends ONE throwaway "." user turn (idle conversations end on an
  *      assistant message, which isn't a valid trailing turn).
- *    Then, ~WARM_EVERY_MS after the last activity (only while idle), it:
+ *    Then, ~warmEveryMs after the last activity (only while idle), it:
  *      1. looks up the provider for the model's api via `getApiProvider(model.api)`
  *         — this resolves built-in AND custom providers (e.g. a custom Bedrock
  *         gateway), because pi registers them into the same shared api registry;
@@ -62,7 +62,7 @@
  *    (Opus, 100k ctx: ~$0.05/ping vs a $0.625 cold cacheWrite.)
  *
  *    SAFETY: if a ping comes back as a cache *write* (read == 0 / write > read),
- *    the prefix drifted and we paid near-full price. After MAX_CONSEC_MISSES
+ *    the prefix drifted and we paid near-full price. After maxConsecutiveMisses
  *    such pings in a row Cachew disables itself and warns you.
  *
  *    SLEEP-AWARENESS: relative timers freeze while the machine sleeps, so a nap
@@ -90,6 +90,9 @@ import {
 	type ExtensionUIContext,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 // The current model as pi types it on the extension context (Model<any> | undefined).
 type CurrentModel = ExtensionContext["model"];
@@ -102,22 +105,43 @@ import { getApiProvider } from "@earendil-works/pi-ai";
 import { matchesKey } from "@earendil-works/pi-tui";
 
 // ── config ──────────────────────────────────────────────────────────────────
-const DEFAULT_MODE: "magic" | "session" = "magic";
-const TTL_MS = 5 * 60_000; // provider "short" sliding cache TTL (Anthropic 5 min)
-const WARM_EVERY_MS = 4 * 60_000; // fire at 240s — a full 60s under the 5-min TTL
-const PING_TIMEOUT_MS = 30_000; // give up on a magic ping after 30s
-const MAX_CONSEC_MISSES = 2; // disable magic after this many cache-miss pings
-const SESSION_PING_TEXT = "."; // what "session" mode sends into history
+type CachewMode = "magic" | "session";
+type CachewConfig = {
+	mode: CachewMode;
+	footer: boolean;
+	ttlMs: number;
+	warmEveryMs: number;
+	pingTimeoutMs: number;
+	maxConsecutiveMisses: number;
+	sessionPingText: string;
+	coldSkipMarginMs: number;
+	wakeDriftMs: number;
+	warmAnyModel: boolean;
+};
+
+const CONFIG_PATH = join(homedir(), ".pi", "agent", "cachew.json");
+const DEFAULT_CONFIG: CachewConfig = {
+	mode: "magic",
+	footer: true,
+	ttlMs: 5 * 60_000,
+	warmEveryMs: 4 * 60_000,
+	pingTimeoutMs: 30_000,
+	maxConsecutiveMisses: 2,
+	sessionPingText: ".",
+	coldSkipMarginMs: 20_000,
+	wakeDriftMs: 5_000,
+	warmAnyModel: false,
+};
 // SLEEP-AWARENESS: setTimeout freezes while the machine is asleep, so a laptop
 // nap longer than the TTL always expires the cache (unavoidable — the CPU is
 // frozen). What we CAN avoid is the wasteful auto-rewarm on wake: if more than
-// (TTL − COLD_SKIP_MARGIN_MS) has elapsed since we last warmed, the prefix is
+// (ttlMs − coldSkipMarginMs) has elapsed since we last warmed, the prefix is
 // already cold, so firing a keep-alive would pay a full cacheWrite for nobody
 // (a real user turn re-warms at the same price anyway). We skip it and let the
-// next real turn re-warm lazily. WAKE_DRIFT_MS: a jump this large between the
+// next real turn re-warm lazily. wakeDriftMs: a jump this large between the
 // 1s display ticks means we just resumed from sleep — cancel any overdue ping.
-const COLD_SKIP_MARGIN_MS = 20_000; // treat cache as cold this long before the TTL
-const WAKE_DRIFT_MS = 5_000; // clock jump between display ticks ⇒ resumed from sleep
+// `coldSkipMarginMs` treats cache as cold this long before the TTL.
+// `wakeDriftMs` treats a clock jump between display ticks as resumed-from-sleep.
 
 /**
  * Pure predicate (exported for testing): has the cached prefix almost certainly
@@ -128,11 +152,42 @@ const WAKE_DRIFT_MS = 5_000; // clock jump between display ticks ⇒ resumed fro
 export function isCacheCold(lastWarmAtMs: number, nowMs: number, ttlMs: number, marginMs: number): boolean {
 	return nowMs - lastWarmAtMs >= ttlMs - marginMs;
 }
-const WARM_ANY_MODEL = false; // false → only warm models with cost.cacheRead > 0
+function positiveNumber(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
-function cacheCapable(model: CurrentModel): model is NonNullable<CurrentModel> {
+function loadConfig(path: string): CachewConfig {
+	if (!existsSync(path)) {
+		saveConfig(path, DEFAULT_CONFIG);
+		return { ...DEFAULT_CONFIG };
+	}
+	try {
+		const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+		return {
+			mode: raw.mode === "magic" || raw.mode === "session" ? raw.mode : DEFAULT_CONFIG.mode,
+			footer: typeof raw.footer === "boolean" ? raw.footer : DEFAULT_CONFIG.footer,
+			ttlMs: positiveNumber(raw.ttlMs, DEFAULT_CONFIG.ttlMs),
+			warmEveryMs: positiveNumber(raw.warmEveryMs, DEFAULT_CONFIG.warmEveryMs),
+			pingTimeoutMs: positiveNumber(raw.pingTimeoutMs, DEFAULT_CONFIG.pingTimeoutMs),
+			maxConsecutiveMisses: positiveNumber(raw.maxConsecutiveMisses, DEFAULT_CONFIG.maxConsecutiveMisses),
+			sessionPingText: typeof raw.sessionPingText === "string" ? raw.sessionPingText : DEFAULT_CONFIG.sessionPingText,
+			coldSkipMarginMs: positiveNumber(raw.coldSkipMarginMs, DEFAULT_CONFIG.coldSkipMarginMs),
+			wakeDriftMs: positiveNumber(raw.wakeDriftMs, DEFAULT_CONFIG.wakeDriftMs),
+			warmAnyModel: typeof raw.warmAnyModel === "boolean" ? raw.warmAnyModel : DEFAULT_CONFIG.warmAnyModel,
+		};
+	} catch {
+		return { ...DEFAULT_CONFIG };
+	}
+}
+
+function saveConfig(path: string, config: CachewConfig): void {
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+function cacheCapable(model: CurrentModel, warmAnyModel = DEFAULT_CONFIG.warmAnyModel): model is NonNullable<CurrentModel> {
 	if (!model) return false;
-	if (WARM_ANY_MODEL) return true;
+	if (warmAnyModel) return true;
 	return (model.cost?.cacheRead ?? 0) > 0;
 }
 
@@ -381,7 +436,12 @@ export class CachewLogComponent {
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: ExtensionAPI, options: { configPath?: string } = {}) {
+	const configPath = options.configPath ?? CONFIG_PATH;
+	const config = loadConfig(configPath);
+	const persistConfig = () => saveConfig(configPath, config);
+	const cacheCapableNow = (model: CurrentModel) => cacheCapable(model, config.warmAnyModel);
+
 	type Snapshot = {
 		model: NonNullable<CurrentModel>;
 		systemPrompt: string;
@@ -399,10 +459,11 @@ export default function (pi: ExtensionAPI) {
 	// `before_provider_request`). Opaque/provider-specific; replayed verbatim.
 	let capturedPayload: unknown;
 
-	let mode: "magic" | "session" = DEFAULT_MODE;
+	let mode: CachewMode = config.mode;
 	let enabled = true;
+	let footer = config.footer;
 	let debug = false; // /cachew debug — print full cache metrics + response for EVERY ping
-	let warmEveryMs = WARM_EVERY_MS; // mutable at runtime via `/cachew every <seconds>`
+	let warmEveryMs = config.warmEveryMs; // mutable at runtime via `/cachew every <seconds>`
 	let agentBusy = false;
 	let inFlight = false;
 	let sessionPingPending = false;
@@ -440,7 +501,7 @@ export default function (pi: ExtensionAPI) {
 	};
 
 	// Sleep-aware guard: have we been idle longer than the cache can survive?
-	const cacheLikelyCold = () => isCacheCold(lastWarmAt, Date.now(), TTL_MS, COLD_SKIP_MARGIN_MS);
+	const cacheLikelyCold = () => isCacheCold(lastWarmAt, Date.now(), config.ttlMs, config.coldSkipMarginMs);
 
 	const rate = () => (pings ? Math.round((hits / pings) * 100) : 100);
 	// Human-readable token counts for the cache-miss diagnostics.
@@ -508,9 +569,10 @@ export default function (pi: ExtensionAPI) {
 
 	const render = (note?: string) => {
 		if (!ui) return;
+		if (!footer) return ui.setStatus("cachew", undefined);
 		const tag = `🥜 ${mode}${debug ? " 🐛" : ""}`;
 		if (!enabled) return ui.setStatus("cachew", `${tag} · off`);
-		if (!cacheCapable(currentModel)) return ui.setStatus("cachew", `${tag} · idle (no cache)`);
+		if (!cacheCapableNow(currentModel)) return ui.setStatus("cachew", `${tag} · idle (no cache)`);
 		let mid: string;
 		if (note) mid = note;
 		else if (agentBusy) mid = "active";
@@ -529,7 +591,7 @@ export default function (pi: ExtensionAPI) {
 			// A large jump between 1s ticks means the process was suspended (system
 			// sleep). If the cache went cold while we slept, cancel the now-overdue
 			// ping so it can't fire a doomed full-rewrite; real activity will re-arm.
-			if (now - lastTick > WAKE_DRIFT_MS && warmTimer && cacheLikelyCold()) {
+			if (now - lastTick > config.wakeDriftMs && warmTimer && cacheLikelyCold()) {
 				coldSkips++;
 				clearWarm();
 				logPing({
@@ -579,7 +641,7 @@ export default function (pi: ExtensionAPI) {
 	// fallback for when no captured payload is usable yet).
 	pi.on("context", (event, ctx) => {
 		captureRefs(ctx);
-		if (mode !== "magic" || !cacheCapable(currentModel)) return;
+		if (mode !== "magic" || !cacheCapableNow(currentModel)) return;
 		const active = new Set(pi.getActiveTools?.() ?? []);
 		const tools = (pi.getAllTools?.() ?? [])
 			.filter((t) => active.has(t.name))
@@ -665,7 +727,7 @@ export default function (pi: ExtensionAPI) {
 	async function warmPing() {
 		clearWarm();
 		if (!enabled || agentBusy || inFlight || sessionPingPending) return;
-		if (!cacheCapable(currentModel)) return arm();
+		if (!cacheCapableNow(currentModel)) return arm();
 
 		// Sleep-aware skip: if we've been idle longer than the cache TTL (e.g. the
 		// laptop slept and froze this timer, so it fired late), the prefix is already
@@ -693,7 +755,7 @@ export default function (pi: ExtensionAPI) {
 			// Just send a "." into history; the agent lifecycle re-arms the timer.
 			sessionPingPending = true;
 			render("warming…");
-			pi.sendUserMessage(SESSION_PING_TEXT);
+			pi.sendUserMessage(config.sessionPingText);
 			return;
 		}
 
@@ -739,7 +801,7 @@ export default function (pi: ExtensionAPI) {
 		inFlight = true;
 		render(replayPayload ? "replaying…" : "pinging…");
 		const ac = new AbortController();
-		const killer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
+		const killer = setTimeout(() => ac.abort(), config.pingTimeoutMs);
 		try {
 			// Resolve auth the same way pi does, and set any env the provider needs.
 			let apiKey: string | undefined;
@@ -789,7 +851,7 @@ export default function (pi: ExtensionAPI) {
 			// Debug: show EVERY ping (hit or miss) with full metrics + response.
 			// Otherwise keep the old behaviour: silent hits, warn only on a miss.
 			if (debug) reportPing(via, u, hit ? "hit" : "miss", msgText(msg), think);
-			else if (!hit) warnMiss(via, u, `cache-miss ping ${consecMisses}/${MAX_CONSEC_MISSES}`, think);
+			else if (!hit) warnMiss(via, u, `cache-miss ping ${consecMisses}/${config.maxConsecutiveMisses}`, think);
 			logPing({
 				n: pings,
 				outcome: hit ? "hit" : "miss",
@@ -809,7 +871,7 @@ export default function (pi: ExtensionAPI) {
 				text: msgText(msg),
 			});
 
-			if (consecMisses >= MAX_CONSEC_MISSES) {
+			if (consecMisses >= config.maxConsecutiveMisses) {
 				enabled = false;
 				clearWarm();
 				ui?.notify(
@@ -822,22 +884,22 @@ export default function (pi: ExtensionAPI) {
 		} catch (err) {
 			pings++;
 			consecMisses++;
-			// A timeout (our own PING_TIMEOUT_MS abort) is a different failure from a
+			// A timeout (our own pingTimeoutMs abort) is a different failure from a
 			// provider/serialization error, so say so explicitly instead of surfacing
 			// the opaque "The operation was aborted" AbortError message. It still
 			// counts toward the auto-pause — repeated timeouts mean the gateway is
 			// slow/unreachable and there's no point hammering it.
 			const timedOut = ac.signal.aborted;
-			const secs = Math.round(PING_TIMEOUT_MS / 1000);
+			const secs = Math.round(config.pingTimeoutMs / 1000);
 			const reason = timedOut ? `ping timed out after ${secs}s` : (err as Error).message;
 			ui?.notify(
-				`🥜 Cachew ping error ${consecMisses}/${MAX_CONSEC_MISSES} ` +
+				`🥜 Cachew ping error ${consecMisses}/${config.maxConsecutiveMisses} ` +
 					`(${replayPayload ? "replay" : "reconstruct"}) on ${currentModel?.id ?? "model"}: ` +
 					`${reason}` +
 					(replayPayload ? ` · ${describeThinking(capturedPayload)}` : ""),
 				"warning",
 			);
-			if (consecMisses >= MAX_CONSEC_MISSES) {
+			if (consecMisses >= config.maxConsecutiveMisses) {
 				enabled = false;
 				clearWarm();
 				ui?.notify(
@@ -857,10 +919,10 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	// /cachew  — status | on | off | reset | debug | log | mode magic|session | every <seconds> | now
+	// /cachew  — status | on | off | reset | footer [on|off] | debug | log | mode magic|session | every <seconds> | now
 	pi.registerCommand("cachew", {
 		description:
-			"🥜 keep the prompt cache warm (status|on|off|reset|debug [on|off]|log|mode magic|session|every <seconds>|now)",
+			"🥜 keep the prompt cache warm (status|on|off|reset|footer [on|off]|debug [on|off]|log|mode magic|session|every <seconds>|now)",
 		handler: async (args, ctx) => {
 			captureRefs(ctx);
 			startDisplay();
@@ -883,6 +945,12 @@ export default function (pi: ExtensionAPI) {
 					pingLog.length = 0;
 					ctx.ui.notify("🥜 stats reset", "info");
 					break;
+				case "footer":
+					footer = arg === "on" ? true : arg === "off" ? false : !footer;
+					config.footer = footer;
+					persistConfig();
+					ctx.ui.notify(`🥜 footer ${footer ? "ON" : "off"}`, "info");
+					break;
 				case "log":
 					if (ctx.mode !== "tui" || !ctx.hasUI) {
 						ctx.ui.notify(`🥜 ${pingLog.length} pings logged — open /cachew log in the TUI to view`, "info");
@@ -903,6 +971,8 @@ export default function (pi: ExtensionAPI) {
 				case "mode":
 					if (arg === "magic" || arg === "session") {
 						mode = arg;
+						config.mode = mode;
+						persistConfig();
 						ctx.ui.notify(`🥜 mode → ${mode}`, "info");
 					} else {
 						ctx.ui.notify(`🥜 mode is "${mode}" (use: /cachew mode magic|session)`, "info");
@@ -918,6 +988,8 @@ export default function (pi: ExtensionAPI) {
 						break;
 					}
 					warmEveryMs = secs * 1000;
+					config.warmEveryMs = warmEveryMs;
+					persistConfig();
 					arm(); // re-arm with the new interval
 					ctx.ui.notify(`🥜 warming every ${secs}s`, "info");
 					break;
@@ -951,8 +1023,9 @@ export default function (pi: ExtensionAPI) {
 				default:
 					ctx.ui.notify(
 						`🥜 Cachew ${enabled ? "on" : "off"} · mode ${mode} · ` +
-							`${cacheCapable(currentModel) ? "cacheable" : "no cache on this model"} · ` +
+							`${cacheCapableNow(currentModel) ? "cacheable" : "no cache on this model"} · ` +
 							`${hits}/${pings} hits (${rate()}%) · ${coldSkips} cold-skips · every ${Math.round(warmEveryMs / 1000)}s` +
+							`${footer ? "" : " · footer off"}` +
 							`${debug ? " · debug ON" : ""}`,
 						"info",
 					);
