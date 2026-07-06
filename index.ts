@@ -194,10 +194,12 @@ function cacheCapable(model: CurrentModel, warmAnyModel = DEFAULT_CONFIG.warmAny
 /**
  * The captured payload is replayed as an OPAQUE BLOB — we never inspect the
  * prefix (system / messages / tools / cache breakpoints). The single exception:
- * cap the output to 1 token so the warm ping is cheap. That cap field is the
- * only thing whose name/location is provider-specific, so we recognise known
- * wire shapes and clone-with-override. Returns `undefined` for an unrecognised
- * shape, which signals the caller to fall back to generic reconstruction.
+ * cap the output to a minimal number of tokens (1, or 16 for OpenAI Responses —
+ * see OPENAI_RESPONSES_MIN_OUTPUT_TOKENS) so the warm ping is cheap. That cap
+ * field is the only thing whose name/location is provider-specific, so we
+ * recognise known wire shapes and clone-with-override. Returns `undefined` for
+ * an unrecognised shape, which signals the caller to fall back to generic
+ * reconstruction.
  */
 // OpenAI's Responses API rejects `max_output_tokens` below 16
 // (`integer_below_min_value`), so a 1-token cap makes the whole ping a 400 that

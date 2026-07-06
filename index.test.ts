@@ -227,6 +227,11 @@ test("capOutputTokens caps output verbatim per wire shape and leaves the prefix 
 		(capOutputTokens({ max_output_tokens: 9000 }) as any).max_output_tokens,
 		OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
 	);
+	// ...and a below-minimum request is floored UP to 16, not passed through.
+	assert.equal(
+		(capOutputTokens({ max_output_tokens: 9 }) as any).max_output_tokens,
+		OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+	);
 	// OpenAI Chat Completions: capped to 1 (no sub-16 floor there).
 	assert.equal((capOutputTokens({ max_completion_tokens: 9 }) as any).max_completion_tokens, 1);
 	// Google (pi wire shape: { model, contents, config } — cap lives at config.maxOutputTokens).
