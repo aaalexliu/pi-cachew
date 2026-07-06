@@ -199,6 +199,13 @@ function cacheCapable(model: CurrentModel, warmAnyModel = DEFAULT_CONFIG.warmAny
  * wire shapes and clone-with-override. Returns `undefined` for an unrecognised
  * shape, which signals the caller to fall back to generic reconstruction.
  */
+// OpenAI's Responses API rejects `max_output_tokens` below 16
+// (`integer_below_min_value`), so a 1-token cap makes the whole ping a 400 that
+// pi's streamer surfaces as an empty, zero-usage reply — which cachew then
+// (correctly, given the data) reads as a cache MISS and pauses after a couple.
+// Cap to the API minimum instead; 16 output tokens is still negligible.
+export const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
+
 export function capOutputTokens(payload: unknown): unknown | undefined {
 	if (!payload || typeof payload !== "object") return undefined;
 	const p = payload as Record<string, any>;
@@ -208,8 +215,8 @@ export function capOutputTokens(payload: unknown): unknown | undefined {
 	}
 	// Anthropic Messages.
 	if ("max_tokens" in p) return { ...p, max_tokens: 1 };
-	// OpenAI Responses.
-	if ("max_output_tokens" in p) return { ...p, max_output_tokens: 1 };
+	// OpenAI Responses. Floor at the API minimum (16), not 1 — see constant above.
+	if ("max_output_tokens" in p) return { ...p, max_output_tokens: OPENAI_RESPONSES_MIN_OUTPUT_TOKENS };
 	// OpenAI Chat Completions.
 	if ("max_completion_tokens" in p) return { ...p, max_completion_tokens: 1 };
 	// Google Generative AI / Vertex: pi's wire payload is { model, contents, config }
@@ -819,14 +826,20 @@ export default function (pi: ExtensionAPI, options: { configPath?: string } = {}
 
 			// NOTE: do NOT pass `reasoning: "off"`. The Bedrock streamer rejects it
 			// with a SerializationException; omitting it means no extended thinking
-			// anyway, and maxTokens:1 keeps the ping minimal (verified live).
+			// anyway, and a minimal maxTokens keeps the ping cheap (verified live).
+			// OpenAI's Responses API floors max_output_tokens at 16, so a 1-token cap
+			// there is a 400; use the API minimum for that api and 1 everywhere else.
+			// (In replay mode this only affects the reconstruct fallback, since
+			// `onPayload` otherwise sends the captured request verbatim.)
 			//
 			// In replay mode, `onPayload` returns the captured request, which the
 			// provider sends verbatim instead of the one built from `context`.
+			const pingMaxTokens =
+				currentModel.api === "openai-responses" ? OPENAI_RESPONSES_MIN_OUTPUT_TOKENS : 1;
 			const stream = provider.streamSimple(currentModel, context as any, {
 				apiKey,
 				headers,
-				maxTokens: 1,
+				maxTokens: pingMaxTokens,
 				cacheRetention: "short", // match pi's default window
 				signal: ac.signal,
 				...(replayPayload ? { onPayload: () => replayPayload } : {}),
