@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import cachew, { capOutputTokens, describeThinking, isCacheCold, CachewLogComponent, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS } from "./index.ts";
+import cachew, { capOutputTokens, describeThinking, isCacheCold, CachewLogComponent, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS, minOutputTokensForApi } from "./index.ts";
 
 /**
  * Minimal recorder for the `pi` ExtensionAPI: captures the handlers and command
@@ -249,6 +249,21 @@ test("capOutputTokens caps output verbatim per wire shape and leaves the prefix 
 	assert.equal(capOutputTokens({ something: "else" }), undefined);
 	assert.equal(capOutputTokens(undefined), undefined);
 	assert.equal(capOutputTokens("nope"), undefined);
+});
+
+test("minOutputTokensForApi floors per api (reconstruct path): 16 for all Responses variants, 1 otherwise", () => {
+	// Every OpenAI Responses variant shares the 16-token floor.
+	assert.equal(minOutputTokensForApi("openai-responses"), OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
+	assert.equal(minOutputTokensForApi("azure-openai-responses"), OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
+	assert.equal(minOutputTokensForApi("openai-codex-responses"), OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
+	// Everything else accepts a 1-token cap.
+	assert.equal(minOutputTokensForApi("anthropic-messages"), 1);
+	assert.equal(minOutputTokensForApi("openai-completions"), 1);
+	assert.equal(minOutputTokensForApi("bedrock-converse-stream"), 1);
+	assert.equal(minOutputTokensForApi("google-generative-ai"), 1);
+	// Unknown / undefined api defaults to the safe 1.
+	assert.equal(minOutputTokensForApi("something-new"), 1);
+	assert.equal(minOutputTokensForApi(undefined), 1);
 });
 
 test("describeThinking detects extended thinking per wire shape (for cache-miss diagnostics)", () => {
