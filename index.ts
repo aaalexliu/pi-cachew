@@ -191,16 +191,6 @@ function cacheCapable(model: CurrentModel, warmAnyModel = DEFAULT_CONFIG.warmAny
 	return (model.cost?.cacheRead ?? 0) > 0;
 }
 
-/**
- * The captured payload is replayed as an OPAQUE BLOB — we never inspect the
- * prefix (system / messages / tools / cache breakpoints). The single exception:
- * cap the output to a minimal number of tokens (1, or 16 for OpenAI Responses —
- * see OPENAI_RESPONSES_MIN_OUTPUT_TOKENS) so the warm ping is cheap. That cap
- * field is the only thing whose name/location is provider-specific, so we
- * recognise known wire shapes and clone-with-override. Returns `undefined` for
- * an unrecognised shape, which signals the caller to fall back to generic
- * reconstruction.
- */
 // OpenAI's Responses API rejects `max_output_tokens` below 16
 // (`integer_below_min_value`), so a 1-token cap makes the whole ping a 400 that
 // pi's streamer surfaces as an empty, zero-usage reply — which cachew then
@@ -208,61 +198,155 @@ function cacheCapable(model: CurrentModel, warmAnyModel = DEFAULT_CONFIG.warmAny
 // Cap to the API minimum instead; 16 output tokens is still negligible.
 export const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
+/**
+ * Single source of truth for per-provider wire-shape knowledge. Each entry
+ * colocates everything cachew needs to know about one provider's request shape,
+ * so adding/adjusting a provider is one table entry instead of edits scattered
+ * across `capOutputTokens`, `describeThinking`, and the warm-ping builder:
+ *
+ *   - `apis`            pi `model.api` values that serialise to this shape. Used
+ *                       by the reconstruct path, which has the model but no
+ *                       captured payload to shape-match on.
+ *   - `minOutputTokens` the API's floor for the output cap (1 for most; OpenAI
+ *                       Responses rejects < 16 — see the constant above).
+ *   - `matchCap`        structural test recognising this shape from a payload.
+ *   - `capOutput`       clone-with-override rewriting just the output-cap field.
+ *   - `readThinking`    thinking/reasoning summary for cache-miss diagnostics,
+ *                       or `undefined` if this shape's marker is absent (so
+ *                       `describeThinking` falls through to the next entry).
+ *
+ * `matchCap` and `readThinking` deliberately test *different* fields: the output
+ * cap lives in a structural, always-present field, whereas thinking is optional
+ * and detected on its own marker — so diagnostics still work on partial
+ * (thinking-only) payloads. Order matters: the first matching entry wins, so
+ * keep the list ordered from most- to least-specific shape.
+ */
+type WireShape = {
+	name: string;
+	apis: string[];
+	minOutputTokens: number;
+	matchCap: (p: Record<string, any>) => boolean;
+	capOutput: (p: Record<string, any>, maxTokens: number) => Record<string, any>;
+	readThinking: (p: Record<string, any>) => string | undefined;
+};
+
+const WIRE_SHAPES: WireShape[] = [
+	// Bedrock Converse (ConverseStreamCommandInput) — also custom Bedrock gateways.
+	// Thinking lives in additionalModelRequestFields.reasoning_config/thinking.
+	{
+		name: "bedrock-converse",
+		apis: ["bedrock-converse-stream"],
+		minOutputTokens: 1,
+		matchCap: (p) => !!p.inferenceConfig && typeof p.inferenceConfig === "object",
+		capOutput: (p, n) => ({ ...p, inferenceConfig: { ...p.inferenceConfig, maxTokens: n } }),
+		readThinking: (p) => {
+			const amrf = p.additionalModelRequestFields;
+			if (amrf && typeof amrf === "object") {
+				const rc = amrf.reasoning_config ?? amrf.reasoningConfig ?? amrf.thinking;
+				if (rc && typeof rc === "object") {
+					const b = rc.budget_tokens ?? rc.budgetTokens ?? rc.max_tokens;
+					return `thinking ON (budget ${b ?? "?"})`;
+				}
+				if ("reasoning_config" in amrf || "thinking" in amrf) return "thinking ON";
+			}
+			return undefined;
+		},
+	},
+	// Anthropic Messages: top-level max_tokens; thinking: { type, budget_tokens }.
+	{
+		name: "anthropic-messages",
+		apis: ["anthropic-messages"],
+		minOutputTokens: 1,
+		matchCap: (p) => "max_tokens" in p,
+		capOutput: (p, n) => ({ ...p, max_tokens: n }),
+		readThinking: (p) => {
+			if (p.thinking && typeof p.thinking === "object") {
+				if (p.thinking.type === "enabled" || p.thinking.budget_tokens)
+					return `thinking ON (budget ${p.thinking.budget_tokens ?? "?"})`;
+				return "thinking OFF";
+			}
+			return undefined;
+		},
+	},
+	// OpenAI Responses (+ Azure/Codex variants): max_output_tokens, floored at 16;
+	// reasoning: { effort }. The azure/codex variants share the Responses API AND
+	// its 16-token floor, so listing them here fixes the reconstruct path too — the
+	// replay path already covered them via matchCap on the shared field.
+	{
+		name: "openai-responses",
+		apis: ["openai-responses", "azure-openai-responses", "openai-codex-responses"],
+		minOutputTokens: OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+		matchCap: (p) => "max_output_tokens" in p,
+		capOutput: (p, n) => ({ ...p, max_output_tokens: n }),
+		readThinking: (p) =>
+			p.reasoning && typeof p.reasoning === "object" ? `reasoning ON (effort ${p.reasoning.effort ?? "?"})` : undefined,
+	},
+	// OpenAI Chat Completions: max_completion_tokens (no sub-16 floor here).
+	{
+		name: "openai-completions",
+		apis: ["openai-completions"],
+		minOutputTokens: 1,
+		matchCap: (p) => "max_completion_tokens" in p,
+		capOutput: (p, n) => ({ ...p, max_completion_tokens: n }),
+		readThinking: () => undefined,
+	},
+	// Google Generative AI / Vertex: pi's wire payload is { model, contents, config }
+	// with generation params spread into `config` (cap at config.maxOutputTokens),
+	// NOT a top-level `generationConfig`. Thinking lives at config.thinkingConfig.
+	{
+		name: "google",
+		apis: ["google-generative-ai", "google-vertex"],
+		minOutputTokens: 1,
+		matchCap: (p) => !!p.config && typeof p.config === "object" && Array.isArray(p.contents),
+		capOutput: (p, n) => ({ ...p, config: { ...p.config, maxOutputTokens: n } }),
+		readThinking: (p) => {
+			const tc = p.config?.thinkingConfig;
+			return tc ? `thinking ON (budget ${tc.thinkingBudget ?? tc.thinkingLevel ?? "?"})` : undefined;
+		},
+	},
+];
+
+/**
+ * Minimum output-token cap for a given pi `model.api`. Used by the warm-ping
+ * builder's reconstruct path, which has the model but no captured payload to
+ * shape-match on. Unknown apis default to 1 (matches every non-Responses shape).
+ */
+export function minOutputTokensForApi(api: string | undefined): number {
+	const shape = api ? WIRE_SHAPES.find((s) => s.apis.includes(api)) : undefined;
+	return shape?.minOutputTokens ?? 1;
+}
+
+/**
+ * The captured payload is replayed as an OPAQUE BLOB — we never inspect the
+ * prefix (system / messages / tools / cache breakpoints). The single exception:
+ * cap the output to a minimal number of tokens (1, or 16 for OpenAI Responses)
+ * so the warm ping is cheap. That cap field is the only thing whose name/location
+ * is provider-specific, so we match known wire shapes (WIRE_SHAPES) and
+ * clone-with-override. Returns `undefined` for an unrecognised shape, which
+ * signals the caller to fall back to generic reconstruction.
+ */
 export function capOutputTokens(payload: unknown): unknown | undefined {
 	if (!payload || typeof payload !== "object") return undefined;
 	const p = payload as Record<string, any>;
-	// Bedrock Converse (ConverseStreamCommandInput) — also custom Bedrock gateways.
-	if (p.inferenceConfig && typeof p.inferenceConfig === "object") {
-		return { ...p, inferenceConfig: { ...p.inferenceConfig, maxTokens: 1 } };
-	}
-	// Anthropic Messages.
-	if ("max_tokens" in p) return { ...p, max_tokens: 1 };
-	// OpenAI Responses. Floor at the API minimum (16), not 1 — see constant above.
-	if ("max_output_tokens" in p) return { ...p, max_output_tokens: OPENAI_RESPONSES_MIN_OUTPUT_TOKENS };
-	// OpenAI Chat Completions.
-	if ("max_completion_tokens" in p) return { ...p, max_completion_tokens: 1 };
-	// Google Generative AI / Vertex: pi's wire payload is { model, contents, config }
-	// with the generation params spread into `config` (so the output cap lives at
-	// `config.maxOutputTokens`), NOT a top-level `generationConfig`. Match that shape.
-	if (p.config && typeof p.config === "object" && Array.isArray(p.contents)) {
-		return { ...p, config: { ...p.config, maxOutputTokens: 1 } };
-	}
-	return undefined;
+	const shape = WIRE_SHAPES.find((s) => s.matchCap(p));
+	return shape ? shape.capOutput(p, shape.minOutputTokens) : undefined;
 }
 
 /**
  * Inspect a captured wire payload and report whether extended thinking /
  * reasoning was enabled (and its token budget). Used purely for cache-miss
  * diagnostics: it lets a single warning say whether the replayed request was a
- * thinking-enabled one capped to 1 output token — the exact condition behind the
- * "thinking drift" hypothesis — so we can confirm or kill that theory from data
- * instead of guessing. Recognises the same wire shapes as `capOutputTokens`.
+ * thinking-enabled one — the exact condition behind the "thinking drift"
+ * hypothesis — so we can confirm or kill that theory from data instead of
+ * guessing. Falls through WIRE_SHAPES shape-by-shape, so it also works on
+ * partial (thinking-only) payloads.
  */
 export function describeThinking(payload: unknown): string {
 	if (!payload || typeof payload !== "object") return "thinking n/a";
 	const p = payload as Record<string, any>;
-	// Bedrock Converse (also custom Bedrock gateways): additionalModelRequestFields.
-	const amrf = p.additionalModelRequestFields;
-	if (amrf && typeof amrf === "object") {
-		const rc = amrf.reasoning_config ?? amrf.reasoningConfig ?? amrf.thinking;
-		if (rc && typeof rc === "object") {
-			const b = rc.budget_tokens ?? rc.budgetTokens ?? rc.max_tokens;
-			return `thinking ON (budget ${b ?? "?"})`;
-		}
-		if ("reasoning_config" in amrf || "thinking" in amrf) return "thinking ON";
-	}
-	// Anthropic Messages: thinking: { type: "enabled", budget_tokens }.
-	if (p.thinking && typeof p.thinking === "object") {
-		if (p.thinking.type === "enabled" || p.thinking.budget_tokens)
-			return `thinking ON (budget ${p.thinking.budget_tokens ?? "?"})`;
-		return "thinking OFF";
-	}
-	// OpenAI Responses: reasoning: { effort }.
-	if (p.reasoning && typeof p.reasoning === "object") return `reasoning ON (effort ${p.reasoning.effort ?? "?"})`;
-	// Google Generative AI / Vertex: config.thinkingConfig (thinkingBudget or thinkingLevel).
-	if (p.config?.thinkingConfig) {
-		const tc = p.config.thinkingConfig;
-		return `thinking ON (budget ${tc.thinkingBudget ?? tc.thinkingLevel ?? "?"})`;
+	for (const shape of WIRE_SHAPES) {
+		const t = shape.readThinking(p);
+		if (t !== undefined) return t;
 	}
 	return "thinking OFF";
 }
@@ -829,15 +913,15 @@ export default function (pi: ExtensionAPI, options: { configPath?: string } = {}
 			// NOTE: do NOT pass `reasoning: "off"`. The Bedrock streamer rejects it
 			// with a SerializationException; omitting it means no extended thinking
 			// anyway, and a minimal maxTokens keeps the ping cheap (verified live).
-			// OpenAI's Responses API floors max_output_tokens at 16, so a 1-token cap
-			// there is a 400; use the API minimum for that api and 1 everywhere else.
-			// (In replay mode this only affects the reconstruct fallback, since
-			// `onPayload` otherwise sends the captured request verbatim.)
+			// The floor is per-api (OpenAI Responses needs >= 16; everything else
+			// accepts 1) — see minOutputTokensForApi / WIRE_SHAPES for the single
+			// source of truth. (In replay mode this only affects the reconstruct
+			// fallback, since `onPayload` otherwise sends the captured request
+			// verbatim.)
 			//
 			// In replay mode, `onPayload` returns the captured request, which the
 			// provider sends verbatim instead of the one built from `context`.
-			const pingMaxTokens =
-				currentModel.api === "openai-responses" ? OPENAI_RESPONSES_MIN_OUTPUT_TOKENS : 1;
+			const pingMaxTokens = minOutputTokensForApi(currentModel.api);
 			const stream = provider.streamSimple(currentModel, context as any, {
 				apiKey,
 				headers,
