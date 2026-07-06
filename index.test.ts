@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import cachew, { capOutputTokens, describeThinking, isCacheCold, CachewLogComponent } from "./index.ts";
+import cachew, { capOutputTokens, describeThinking, isCacheCold, CachewLogComponent, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS } from "./index.ts";
 
 /**
  * Minimal recorder for the `pi` ExtensionAPI: captures the handlers and command
@@ -222,8 +222,17 @@ test("capOutputTokens caps output verbatim per wire shape and leaves the prefix 
 
 	// Anthropic Messages: top-level max_tokens.
 	assert.equal((capOutputTokens({ max_tokens: 8000, messages: [] }) as any).max_tokens, 1);
-	// OpenAI Responses / Completions.
-	assert.equal((capOutputTokens({ max_output_tokens: 9 }) as any).max_output_tokens, 1);
+	// OpenAI Responses: floored at the API minimum (16), NOT 1 — sub-16 is a 400.
+	assert.equal(
+		(capOutputTokens({ max_output_tokens: 9000 }) as any).max_output_tokens,
+		OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+	);
+	// ...and a below-minimum request is floored UP to 16, not passed through.
+	assert.equal(
+		(capOutputTokens({ max_output_tokens: 9 }) as any).max_output_tokens,
+		OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+	);
+	// OpenAI Chat Completions: capped to 1 (no sub-16 floor there).
 	assert.equal((capOutputTokens({ max_completion_tokens: 9 }) as any).max_completion_tokens, 1);
 	// Google (pi wire shape: { model, contents, config } — cap lives at config.maxOutputTokens).
 	const cappedGoogle = capOutputTokens({
