@@ -23,6 +23,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "live-test": "node scripts/live-cache-test.mjs",
     "test": "node --import ./test-alias-hook.mjs --test --experimental-strip-types '**/*.test.ts'"
   },
   "peerDependencies": {

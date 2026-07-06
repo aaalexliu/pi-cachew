@@ -437,3 +437,36 @@ verdict: HIT
 
 The warm ping read the entire 13,512-token cached prefix at the cacheRead rate
 and refreshed the TTL — exactly as designed.
+
+### Reproducible live test (`scripts/live-cache-test.mjs`)
+
+`npm run live-test` drives a **real** pi session over the RPC protocol
+(`pi --mode rpc`), loads *this repo's* cachew build, does one real turn to prime
+the prefix, fires `/cachew now`, and asserts cachew's own per-ping readout is a
+cache **HIT** (non-zero `cacheRead`). It's provider-agnostic — point it at any
+provider/gateway extension that registers the models you want to warm:
+
+```bash
+npm run live-test -- \
+  --extension /path/to/your/gateway-provider-extension \
+  --model your-provider/your-model [--model ...]
+```
+
+Why RPC and not a TUI/pty: RPC is a real session (extensions load, lifecycle
+events fire, `/cachew now` runs immediately) but speaks structured JSONL, so
+cachew's `notify` HIT/MISS readout is parseable instead of ANSI screen paint.
+By default it isolates `PI_CODING_AGENT_DIR` to a temp dir so a globally
+installed cachew doesn't double-load. Exit code is 0 iff every model HITs; a
+MISS/NO-PING means that model (or its gateway) isn't returning cache usage.
+Useful flags: `--thinking <level>`, `--warm-text`, `--verbose`, `--no-isolate`.
+
+Example run against the Rippling gateway, confirming the OpenAI-Responses
+16-token fix (both Responses models read back the cached prefix):
+
+```
+✅ HIT  rippling-openai/gpt-5.4
+     [debug] ping #1 HIT ✅ (replay) on gpt-5.4: cacheRead 2.0k · cacheWrite 0 · input 131 · out 6 · $0.0019 · reasoning ON (effort medium)
+✅ HIT  rippling-openai/gpt-5.5
+     [debug] ping #2 HIT ✅ (replay) on gpt-5.5: cacheRead 2.0k · cacheWrite 0 · input 146 · out 6 · $0.0019 · reasoning ON (effort medium)
+2/2 HIT
+```
